@@ -32,6 +32,12 @@ and `Grep` are **denied**, because they have no seam and would keep acting on
 the local filesystem while the agent believes otherwise. The agent is told to
 use shell commands, which are transparently remote.
 
+`Read` is denied by reach's hook rather than by a permission rule, so that it
+can open one kind of file: Claude Code's own background-task output, which is
+written on this machine and which the model is told to `Read` when a background
+command finishes. Any other path is refused, and so is every `Read` when the
+hook cannot load its session.
+
 **mirror** — additionally wires reach's hook into the file tools. Each file is
 fetched from the target the moment a tool opens it and written back when
 changed, so `Read`, `Edit` and `Write` work natively on remote content.

@@ -227,3 +227,9 @@ func isPathEnvKey(k string) bool { return strings.EqualFold(k, "PATH") }
 // harnessStopSignals are the signals a harness can end a tool call with. Windows
 // has no SIGHUP to deliver; Go reports a closed console as SIGTERM.
 var harnessStopSignals = []os.Signal{syscall.SIGTERM, os.Interrupt}
+
+// claudeTempRoots are the directories Claude Code may write background-task
+// output under: its own override and the temp directory.
+func claudeTempRoots() []string {
+	return []string{os.Getenv("CLAUDE_CODE_TMPDIR"), os.TempDir()}
+}

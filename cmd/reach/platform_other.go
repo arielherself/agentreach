@@ -73,3 +73,11 @@ func isPathEnvKey(k string) bool { return k == "PATH" }
 // for a timeout or a killed background job (Claude Code 2.1.295, observed), and
 // SIGINT and SIGHUP for an interrupt or a terminal going away.
 var harnessStopSignals = []os.Signal{syscall.SIGTERM, os.Interrupt, syscall.SIGHUP}
+
+// claudeTempRoots are the directories Claude Code may write background-task
+// output under: its own override, the private runtime directory it falls back
+// to, and the temp directory, with /tmp spelled out because Claude Code uses it
+// even when TMPDIR points elsewhere.
+func claudeTempRoots() []string {
+	return []string{os.Getenv("CLAUDE_CODE_TMPDIR"), os.Getenv("XDG_RUNTIME_DIR"), os.TempDir(), "/tmp"}
+}

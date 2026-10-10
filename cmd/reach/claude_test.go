@@ -56,9 +56,14 @@ func TestWriteDenySettingsDeniesTheFileToolsAndWiresTheBashHook(t *testing.T) {
 		t.Errorf("settings grant a blanket allowance: %v", doc.Permissions.Allow)
 	}
 
+	// Read is left out of the deny list only because the hook decides it; a
+	// matcher that missed it would leave Read open on the local disk.
+	if contains(doc.Permissions.Deny, "Read") {
+		t.Errorf("Read is denied by rule; background-task output would be unreadable")
+	}
 	pre := doc.Hooks["PreToolUse"]
-	if len(pre) != 1 || pre[0].Matcher != "Bash" {
-		t.Fatalf("PreToolUse hooks are %+v, want exactly the Bash matcher", pre)
+	if len(pre) != 1 || pre[0].Matcher != "Bash|Read" {
+		t.Fatalf("PreToolUse hooks are %+v, want exactly the Bash|Read matcher", pre)
 	}
 	if len(pre[0].Hooks) != 1 || pre[0].Hooks[0].Type != "command" ||
 		!strings.HasSuffix(pre[0].Hooks[0].Command, " hook") {

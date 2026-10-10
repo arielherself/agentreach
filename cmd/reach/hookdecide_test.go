@@ -5,8 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -422,13 +424,17 @@ func TestHookMirrorIgnoresUnknownEvents(t *testing.T) {
 // With no session loaded, the hook must be invisible: emit an empty reply and
 // exit 0. A hook that errors out here would break every harness whose config
 // still mentions reach after the session is gone.
+//
+// Read is the exception. Exec mode no longer denies it by rule, so an empty
+// reply would let it open a file on this machine for an agent that believes it
+// is working on the target.
 func TestHookDecideWithoutASession(t *testing.T) {
 	t.Setenv("REACH_HOME", t.TempDir())
 	t.Setenv("REACH_SESSION", "does-not-exist")
 
 	for _, raw := range []string{
-		`{"hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{"file_path":"/srv/app/x"}}`,
 		`{"hook_event_name":"PreToolUse","tool_name":"Grep","tool_input":{"pattern":"x"}}`,
+		`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}`,
 		`not json at all`,
 		``,
 	} {
@@ -437,6 +443,74 @@ func TestHookDecideWithoutASession(t *testing.T) {
 			t.Errorf("input %q produced %+v, want an empty reply", raw, reply)
 		}
 	}
+
+	reply := hookDecide(context.Background(),
+		[]byte(`{"hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{"file_path":"/srv/app/x"}}`))
+	if got := decisionOf(reply); got != "deny" {
+		t.Errorf("Read with no session was answered %q; it would read this machine", got)
+	}
+}
+
+// TestHookReadInExecMode: Read opens Claude Code's own background-task output,
+// which is on this machine, and nothing else.
+func TestHookReadInExecMode(t *testing.T) {
+	t.Setenv("REACH_HOME", t.TempDir())
+	t.Setenv("REACH_SESSION", "hooktest")
+	s := execSession()
+	s.Name = "hooktest"
+	if err := s.Save(); err != nil {
+		t.Fatalf("save session: %v", err)
+	}
+
+	tmp := t.TempDir()
+	t.Setenv("CLAUDE_CODE_TMPDIR", tmp)
+	tasks := filepath.Join(tmp, "claude-1000", "-home-me-proj", "sess", "tasks")
+	if err := os.MkdirAll(tasks, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(tasks, "b1234.output")
+	if err := os.WriteFile(output, []byte("done\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A link in the tasks directory that leads out of it must not become a
+	// way to read anything else.
+	secret := filepath.Join(t.TempDir(), "id_ed25519")
+	if err := os.WriteFile(secret, []byte("key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(tasks, "evil.output")
+	if err := os.Symlink(secret, link); err != nil {
+		t.Skipf("no symlinks here: %v", err)
+	}
+	notTasks := filepath.Join(tmp, "claude-1000", "other.output")
+	if err := os.WriteFile(notTasks, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		path string
+		want string
+	}{
+		{output, "allow"},
+		{link, "deny"},
+		{notTasks, "deny"},
+		{"/srv/app/main.go", "deny"},
+		{"/etc/passwd", "deny"},
+		{"relative/tasks/x.output", "deny"},
+		{filepath.Join(tasks, "missing.output"), "deny"},
+	} {
+		raw := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{"file_path":%q}}`, tc.path)
+		if got := decisionOf(hookDecide(context.Background(), []byte(raw))); got != tc.want {
+			t.Errorf("Read %s: %q, want %q", tc.path, got, tc.want)
+		}
+	}
+}
+
+func decisionOf(r hookReply) string {
+	if r.HookSpecificOutput == nil {
+		return ""
+	}
+	return r.HookSpecificOutput.PermissionDecision
 }
 
 // Whatever the hook decides, the harness has to be able to parse it.
@@ -620,5 +694,33 @@ func TestHookDecideIgnoresBashAfterTheFact(t *testing.T) {
 	})
 	if reply := hookDecide(context.Background(), raw); reply.HookSpecificOutput != nil {
 		t.Fatalf("got %+v, want an empty reply", reply.HookSpecificOutput)
+	}
+}
+
+// A mirror session whose workspace contains the temp directory would otherwise
+// fetch the task output from the target, where it does not exist. It is
+// answered before the mirror is consulted, so this needs no reachable target.
+func TestHookReadTaskOutputInMirrorMode(t *testing.T) {
+	t.Setenv("REACH_HOME", t.TempDir())
+	t.Setenv("REACH_SESSION", "hooktest")
+	s := mirrorSession()
+	s.Name = "hooktest"
+	s.Target.Workspace = "/"
+	if err := s.Save(); err != nil {
+		t.Fatalf("save session: %v", err)
+	}
+	tmp := t.TempDir()
+	t.Setenv("CLAUDE_CODE_TMPDIR", tmp)
+	tasks := filepath.Join(tmp, "claude-1000", "p", "s", "tasks")
+	if err := os.MkdirAll(tasks, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(tasks, "b1.output")
+	if err := os.WriteFile(output, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	raw := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{"file_path":%q}}`, output)
+	if got := decisionOf(hookDecide(context.Background(), []byte(raw))); got != "allow" {
+		t.Errorf("task output in mirror mode: %q, want allow", got)
 	}
 }

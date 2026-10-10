@@ -179,6 +179,19 @@ patching impossible (SEA), the only way to make them act on remote content is
 to place real files at the paths they read. See "Materialisation" in
 `ARCHITECTURE.md`.
 
+### Background-task output (2.1.295)
+
+A Bash call made with `run_in_background`, or a foreground call that outlives
+its timeout, keeps running and writes its output to a file on the operator's
+machine — observed as `/tmp/claude-<uid>/<project>/<session>/tasks/<id>.output`;
+the binary also consults `CLAUDE_CODE_TMPDIR` and `XDG_RUNTIME_DIR`. The notice
+that the task finished carries the exit status and that path, not the output,
+and tells the model to `Read` it. With `Read` denied by rule, a model in exec
+mode had no way to see what the command printed: `cat` ran on the target and
+found nothing, and in one run the model went on to search the target's whole
+disk for the file. Reproduce with `claude -p` in an exec-mode project, asking
+for `sleep 5; echo MAGIC-$(hostname)` with `run_in_background`.
+
 ---
 
 ## Codex CLI 0.147.0

@@ -80,8 +80,25 @@ func hookDecide(ctx context.Context, raw []byte) hookReply {
 		return hookReply{}
 	}
 
+	// Claude Code's background-task output is on this machine in every mode,
+	// and is answered before anything that could fail: it needs no session.
+	otherRead := false
+	if ev.ToolName == "Read" && ev.HookEventName == "PreToolUse" {
+		if p := toolFilePath(ev); p != "" && isClaudeTaskOutput(p) {
+			return allow(ev, "reach: this is Claude Code's own background-task output, "+
+				"which is written on this machine, so it is read here.")
+		}
+		otherRead = true
+	}
+
 	s, err := session.Load(sessionNameFromEnv(""))
 	if err != nil {
+		if otherRead {
+			// Exec mode no longer denies Read by rule, so this hook is all
+			// that stands between Read and the local disk. Saying nothing
+			// would let it through.
+			return deny(ev, "reach: "+err.Error()+"\nRead would act on this machine, so it is refused.")
+		}
 		return hookReply{} // not our business
 	}
 
@@ -93,6 +110,9 @@ func hookDecide(ctx context.Context, raw []byte) hookReply {
 	}
 
 	if s.Mode != session.ModeMirror {
+		if otherRead {
+			return hookRead(ev, s)
+		}
 		return hookReply{} // not our business
 	}
 
@@ -184,6 +204,73 @@ func hookBash(ev hookEvent, s *session.Session) hookReply {
 		"reach: this command runs on %s, not on this machine, so the local "+
 			"working-directory check does not apply to it.",
 		s.Target.Describe()))
+}
+
+// hookRead refuses a Read in exec mode that is not of a background task's
+// output — the one file it may open, answered before this is reached.
+//
+// Exec mode used to deny Read by rule. It is routed here instead so that one
+// exception can exist, which makes this the safety property the rule was:
+// every other path is a file on the operator's machine that the agent would
+// take for the target's.
+func hookRead(ev hookEvent, s *session.Session) hookReply {
+	return deny(ev, fmt.Sprintf(
+		"Read opens files on this machine, but this session works on %s.\n"+
+			"Read the file on the target through the shell instead:\n"+
+			"  cat -- FILE            (or sed -n 'A,Bp' FILE for a range)\n"+
+			"Read is allowed only for a background command's output file.",
+		s.Target.Describe()))
+}
+
+// toolFilePath is the file_path a file tool was called with, or "".
+func toolFilePath(ev hookEvent) string {
+	var input struct {
+		FilePath string `json:"file_path"`
+	}
+	if err := json.Unmarshal(ev.ToolInput, &input); err != nil {
+		return ""
+	}
+	return input.FilePath
+}
+
+// isClaudeTaskOutput reports whether p is an output file Claude Code wrote for
+// a background task: <temp root>/…/tasks/<id>.output, observed on 2.1.295 as
+// /tmp/claude-<uid>/<project>/<session>/tasks/<id>.output.
+//
+// The test is on shape rather than on Claude Code's own path logic, which picks
+// among several roots and moves the tree when it has to. It holds for the path
+// as given and again with symlinks resolved, so a link planted in a temp
+// directory cannot turn this into a way of reading anything else.
+func isClaudeTaskOutput(p string) bool {
+	if !filepath.IsAbs(p) {
+		return false
+	}
+	resolved, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return false
+	}
+	return taskOutputShape(filepath.Clean(p)) && taskOutputShape(resolved)
+}
+
+func taskOutputShape(p string) bool {
+	if !strings.HasSuffix(p, ".output") || filepath.Base(filepath.Dir(p)) != "tasks" {
+		return false
+	}
+	for _, root := range claudeTempRoots() {
+		if root == "" {
+			continue
+		}
+		root = filepath.Clean(root)
+		if r, err := filepath.EvalSymlinks(root); err == nil {
+			if strings.HasPrefix(p, r+string(filepath.Separator)) {
+				return true
+			}
+		}
+		if strings.HasPrefix(p, root+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
 }
 
 // hookMirror makes the decisions that need the target: fetch before a tool

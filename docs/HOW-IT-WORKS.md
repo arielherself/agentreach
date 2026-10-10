@@ -128,7 +128,8 @@ directly. There is no seam in front of it, so if reach left it enabled it would
 keep reading your laptop while the model believed it was reading the server —
 confident nonsense at best, and a `Write` that destroys your own work at worst.
 Where reach cannot redirect, it denies, and tells the model which shell command
-to use instead.
+to use instead. (Claude Code's `Read` keeps one door open: the output file of a
+background command, which Claude Code itself writes on your machine.)
 
 **The best harnesses are the ones that document a machine boundary.** Codex is
 the best fit reach has: it has no native file tools at all — `apply_patch` and

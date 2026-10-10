@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/bojieli/agentreach/internal/harnessprobe"
 	"github.com/bojieli/agentreach/internal/session"
@@ -20,7 +21,18 @@ import (
 // confident nonsense; one that writes a local file it thinks is remote can
 // destroy the operator's own work. Making that impossible is worth the
 // ergonomic cost of routing file access through the shell.
-var deniedFileTools = []string{"Read", "Edit", "Write", "NotebookEdit", "Glob", "Grep"}
+//
+// Read is the one exception, and it is not left open: hookedFileTools sends it
+// to the hook, which denies it everywhere but Claude Code's own background-task
+// output. That file is written on this machine, the notice that a background
+// command finished points the model at it, and with Read denied outright the
+// model had no way to see what the command printed — `cat` runs on the target,
+// where the file does not exist.
+var deniedFileTools = []string{"Edit", "Write", "NotebookEdit", "Glob", "Grep"}
+
+// hookedFileTools are the native file tools exec mode decides per call, in the
+// hook, instead of denying by rule. See hookRead.
+var hookedFileTools = []string{"Read"}
 
 const execModeGuidance = `This session is operating on a REMOTE target through reach.
 
@@ -28,6 +40,10 @@ Your Bash tool runs on the remote target, not on this machine. The native file
 tools (Read, Edit, Write, Glob, Grep) are disabled because they would act on
 the local machine instead of the target, which would silently give you the
 wrong file.
+
+One exception: when a command you ran in the background finishes, read its
+output file with the Read tool, at the path you were given. That file is on
+this machine, so cat cannot see it. Read refuses every other path.
 
 Use shell commands for all file access; they run on the target:
   read      cat -- FILE        (or sed -n 'A,Bp' FILE for a range)
@@ -262,13 +278,14 @@ func writeDenySettings(sessName string) (string, error) {
 	}
 	doc := map[string]any{
 		"permissions": perms{Deny: deniedFileTools},
-		// The deny list is what makes exec mode safe; the hook is what makes it
-		// usable. Claude Code checks the paths in a Bash command against this
-		// machine, and every path worth naming in this session is on the target,
-		// so without the hook a correct command is refused for being correct.
-		// See hookBash.
+		// The deny list and the hook's Read decision are what make exec mode
+		// safe; its Bash decision is what makes it usable. Claude Code checks
+		// the paths in a Bash command against this machine, and every path
+		// worth naming in this session is on the target, so without the hook a
+		// correct command is refused for being correct. See hookBash and
+		// hookRead.
 		"hooks": map[string]any{
-			"PreToolUse": []claudeMatcher{claudeHookOn("Bash", hookCmd)},
+			"PreToolUse": []claudeMatcher{claudeHookOn(strings.Join(append([]string{"Bash"}, hookedFileTools...), "|"), hookCmd)},
 		},
 	}
 	data, err := json.MarshalIndent(doc, "", "  ")
