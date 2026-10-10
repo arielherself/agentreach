@@ -132,6 +132,10 @@ func TestPIDCapture(t *testing.T) {
 		{"never announced", []string{"bash: line 1: oops\n"}, 0, false, "bash: line 1: oops\n"},
 		{"no newline, short", []string{"oops"}, 0, false, "oops"},
 		{"spoofed by another tag", []string{"__reach_zzz__pid:9\n"}, 0, false, "__reach_zzz__pid:9\n"},
+		{"after ssh's own warnings", []string{"** WARNING: connection is not using a post-quantum key exchange algorithm.\r\n** The server may need to be upgraded.\r\n" + tag + "77\nboom\n"}, 77, true,
+			"** WARNING: connection is not using a post-quantum key exchange algorithm.\r\n** The server may need to be upgraded.\r\nboom\n"},
+		{"warning split mid-line", []string{"** WARN", "ING\n" + tag, "5\n"}, 5, true, "** WARNING\n"},
+		{"tag text mid-line is not the tag line", []string{"x" + tag + "5\n"}, 0, false, "x" + tag + "5\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer

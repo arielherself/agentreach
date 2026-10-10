@@ -215,49 +215,94 @@ func closeReader(r io.Reader) {
 	}
 }
 
-// pidCapture takes the line announcePID printed off the front of a command's
-// stderr and passes everything after it through untouched.
+// pidCapture takes the line announcePID printed out of a command's stderr and
+// passes everything else through.
 //
-// Output is held only until the first newline, or until there is more of it
-// than the tag line could be; a target that never printed the line (a shell
-// that is not POSIX, a transport that does not run one) loses nothing.
+// The line is the first thing the remote shell prints, but not always the
+// first thing on the stream: ssh puts its own warnings there before the
+// session starts — a new connection to an old server prints three lines about
+// post-quantum key exchange. So lines are passed on until one carries the tag,
+// and only a line still being written is held, and only while it could still
+// turn out to be the tag line. A target that never prints it (a shell that is
+// not POSIX, a transport that does not run one) stops the search after
+// pidSearchLimit bytes and loses nothing.
 type pidCapture struct {
-	out  io.Writer
-	tag  []byte
-	buf  []byte
-	done bool
+	out     io.Writer
+	tag     []byte
+	buf     []byte
+	seen    int
+	midLine bool // the held bytes continue a line that is not the tag line
+	done    bool
 
 	mu  sync.Mutex
 	pid int
 	ok  bool
 }
 
+const pidSearchLimit = 8 << 10
+
 func (c *pidCapture) Write(p []byte) (int, error) {
 	if c.done {
 		return c.out.Write(p)
 	}
 	c.buf = append(c.buf, p...)
-	nl := bytes.IndexByte(c.buf, '\n')
-	if nl < 0 && len(c.buf) < len(c.tag)+24 {
-		return len(p), nil
-	}
-	c.done = true
-	rest := c.buf
-	if nl >= 0 && bytes.HasPrefix(c.buf, c.tag) {
-		if n, err := strconv.Atoi(string(c.buf[len(c.tag):nl])); err == nil && n > 0 {
-			c.mu.Lock()
-			c.pid, c.ok = n, true
-			c.mu.Unlock()
+	c.seen += len(p)
+	for !c.done {
+		nl := bytes.IndexByte(c.buf, '\n')
+		if nl < 0 {
+			if c.midLine || len(c.buf) >= len(c.tag)+24 || !c.couldBeTag(c.buf) {
+				if err := c.pass(c.buf, true); err != nil {
+					return 0, err
+				}
+				c.buf = nil
+			}
+			break
 		}
-		rest = c.buf[nl+1:]
-	}
-	c.buf = nil
-	if len(rest) > 0 {
-		if _, err := c.out.Write(rest); err != nil {
+		line := c.buf[:nl+1]
+		if !c.midLine && bytes.HasPrefix(line, c.tag) {
+			if n, err := strconv.Atoi(string(line[len(c.tag):nl])); err == nil && n > 0 {
+				c.mu.Lock()
+				c.pid, c.ok = n, true
+				c.mu.Unlock()
+			}
+			c.done = true
+			rest := c.buf[nl+1:]
+			c.buf = nil
+			if len(rest) > 0 {
+				if _, err := c.out.Write(rest); err != nil {
+					return 0, err
+				}
+			}
+			return len(p), nil
+		}
+		if err := c.pass(line, false); err != nil {
 			return 0, err
 		}
+		c.buf = c.buf[nl+1:]
+	}
+	if !c.done && c.seen > pidSearchLimit {
+		c.flush()
 	}
 	return len(p), nil
+}
+
+// couldBeTag reports whether a partial line is still a prefix of the tag line.
+func (c *pidCapture) couldBeTag(b []byte) bool {
+	if len(b) <= len(c.tag) {
+		return bytes.HasPrefix(c.tag, b)
+	}
+	return bytes.HasPrefix(b, c.tag)
+}
+
+// pass forwards output that is not the tag line. partial says it ends inside a
+// line, so the bytes that follow cannot start one.
+func (c *pidCapture) pass(b []byte, partial bool) error {
+	c.midLine = partial
+	if len(b) == 0 {
+		return nil
+	}
+	_, err := c.out.Write(b)
+	return err
 }
 
 // flush releases output held while waiting for a line that never came.
