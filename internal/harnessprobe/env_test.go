@@ -13,7 +13,9 @@ import (
 // reported a working seam as an error: "no reach session named ...".
 func TestClaudeCodeEnvPinsReachHome(t *testing.T) {
 	home := t.TempDir()
+	// os.UserHomeDir reads USERPROFILE on Windows and HOME elsewhere.
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	t.Setenv("REACH_HOME", "")
 	os.Unsetenv("REACH_HOME")
 
