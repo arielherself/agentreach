@@ -220,22 +220,34 @@ command failure sends the agent chasing a phantom bug, and a command failure
 reported as a transport failure makes reach retry something that must not be
 retried.
 
-## A command reach stops waiting for may not stop running
+## A command reach stops waiting for is signalled, not just abandoned
 
-Closing the channel is the whole of reach's control over a command it started.
-A stock sshd offers no way to signal a remote process group, and a command that
-produces no output never notices that the pipe it would have got `EPIPE` from
-has gone — so a timeout, an interrupt, or codex's Esc key ends reach's *interest*
-in a command without necessarily ending the command. `sleep 600` survives; a
-quiet build survives; anything writing steadily to stdout usually does not.
+Closing the channel does not end a command. A stock sshd offers no way to signal
+a remote process group, and a command that produces no output never notices that
+the pipe it would have got `EPIPE` from has gone — `sleep 600` survives a closed
+channel, and so does a quiet build.
 
-reach does not paper over this. A timed-out command says the command may still
-be running and how to check, rather than reporting only that reach gave up. The
-alternative — a shell wrapper that watches for its own stdin to close and kills
-a process group — needs `setsid` or job control that a POSIX floor does not
-guarantee, and getting it wrong means signalling the wrong process group on
-somebody else's server. A local target is not affected: that process is reach's
-own child and is killed.
+So a streamed command reports its own process group before it starts. sshd calls
+`setsid` for every session it opens, which makes the shell it starts the leader
+of a group holding everything the command spawns; that shell prints `$$` on
+stderr behind the run's random marker, and reach strips the line. When reach
+stops waiting — a timeout, or the harness's SIGTERM — it opens a second channel
+on the same connection and sends `kill -TERM -- -PGID`, then SIGKILL two seconds
+later from a detached subshell.
+
+This cannot hit the wrong group. A group id is the pid of the process that
+created it, and that process is the shell reach is talking to, so `-PGID` names
+either the command's group or no group at all; where the shell does not lead one
+(a container runtime that does not `setsid`), the group signal fails and the
+shell alone is signalled. A process that starts its own session — a daemon,
+`setsid`, `nohup` into the background — is outside the group and survives, and
+the error says so and how to check. A local target is reach's own child and is
+killed directly.
+
+Under Claude Code the shell prefix applies no timeout of its own. Claude Code
+bounds the Bash tool itself (observed on 2.1.295: SIGTERM to the prefix, or the
+call moved to the background with a ten-minute limit there), so the session's
+`--timeout` would only be a second, shorter limit the model cannot see or raise.
 
 ## The two interfaces
 

@@ -223,3 +223,7 @@ func fallbackShellPaths() []string {
 // front of the harness, and the harness then finds the real shell and runs the
 // model's commands on the operator's own machine.
 func isPathEnvKey(k string) bool { return strings.EqualFold(k, "PATH") }
+
+// harnessStopSignals are the signals a harness can end a tool call with. Windows
+// has no SIGHUP to deliver; Go reports a closed console as SIGTERM.
+var harnessStopSignals = []os.Signal{syscall.SIGTERM, os.Interrupt}

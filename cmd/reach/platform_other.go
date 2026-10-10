@@ -5,6 +5,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
 // This file and platform_windows.go carry every difference between the two
@@ -67,3 +68,8 @@ func fallbackShellPaths() []string {
 // Unix environments are case-sensitive, so PATH is PATH; a variable called
 // "Path" is a different variable and must not be rewritten.
 func isPathEnvKey(k string) bool { return k == "PATH" }
+
+// harnessStopSignals are the signals a harness sends to end a tool call: SIGTERM
+// for a timeout or a killed background job (Claude Code 2.1.295, observed), and
+// SIGINT and SIGHUP for an interrupt or a terminal going away.
+var harnessStopSignals = []os.Signal{syscall.SIGTERM, os.Interrupt, syscall.SIGHUP}

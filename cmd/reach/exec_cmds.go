@@ -5,7 +5,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/bojieli/agentreach/internal/audit"
@@ -68,7 +71,38 @@ func runShellPrefix(args []string) int {
 		// JSON in, a decision out, a status that says whether there was one.
 		return execRealShell([]string{"-c", raw})
 	}
-	return runOnTarget(context.Background(), sessionNameFromEnv(""), p.Command, p.CwdFile)
+	// Claude Code bounds the Bash tool itself — its own timeout for a
+	// foreground call, none for one it runs in the background — and ends an
+	// overrun by sending SIGTERM to this process. The session's timeout would
+	// be a second, shorter limit the model cannot see or raise: a call it gave
+	// ten minutes failed at two, and a background job died with it. So this
+	// path takes its limit from the harness, through the signal.
+	ctx, received := harnessSignalContext()
+	code := runOnTargetBounded(ctx, sessionNameFromEnv(""), p.Command, p.CwdFile, false)
+	if sig := received(); sig != 0 {
+		// What a shell the harness killed would have reported, which is what
+		// Claude Code shows the model: "Exit code 143".
+		return 128 + sig
+	}
+	return code
+}
+
+// harnessSignalContext is cancelled by the signals a harness uses to stop a
+// tool call — a timeout, an interrupt, a background job being killed — and
+// reports which one arrived, or zero.
+func harnessSignalContext() (context.Context, func() int) {
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, harnessStopSignals...)
+	var got atomic.Int32
+	go func() {
+		s := <-ch
+		if n, ok := s.(syscall.Signal); ok {
+			got.Store(int32(n))
+		}
+		cancel()
+	}()
+	return ctx, func() int { return int(got.Load()) }
 }
 
 // isLocalCallback reports that this invocation is Claude Code running one of
@@ -127,6 +161,12 @@ func recordExec(s *session.Session, command, cwd string, code int, took time.Dur
 // runOnTarget executes one command in a session and mirrors the harness's
 // working-directory bookkeeping.
 func runOnTarget(ctx context.Context, sessionName, command, cwdFile string) int {
+	return runOnTargetBounded(ctx, sessionName, command, cwdFile, true)
+}
+
+// runOnTargetBounded is runOnTarget with the session's per-command timeout
+// optional, for a caller whose harness enforces its own.
+func runOnTargetBounded(ctx context.Context, sessionName, command, cwdFile string, bounded bool) int {
 	s, err := session.Load(sessionName)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "reach:", err)
@@ -153,10 +193,14 @@ func runOnTarget(ctx context.Context, sessionName, command, cwdFile string) int 
 
 	stderr := &cwdCapturingWriter{out: os.Stderr, marker: cwdMarker}
 	started := time.Now()
+	var timeout time.Duration
+	if bounded {
+		timeout = s.Timeout
+	}
 	code, err := transport.RunStream(ctx, t, reach.ExecRequest{
 		Command: command,
 		Dir:     cwd,
-		Timeout: s.Timeout,
+		Timeout: timeout,
 		// The agent gets the PATH the operator would have on that machine.
 		// Without this, a tool the operator installed into ~/.local/bin or
 		// ~/.cargo/bin is invisible to the agent, for no reason it could work
